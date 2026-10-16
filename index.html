@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="om">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Koshkoshe — Geengoo</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+:root{color-scheme:dark;--bg:#101827;--panel:#1b2739;--gold:#ffd34d;--green:#20b86a;--text:#f5f7fb}
+*{box-sizing:border-box}
+body{margin:0;background:radial-gradient(circle at top,#253a56,#101827 60%);color:var(--text);font-family:Arial,sans-serif;text-align:center;padding:18px 12px 30px}
+h1{font-size:23px;margin:8px 0 5px}p{color:#d2d9e5;margin:6px}
+.panel{max-width:520px;margin:14px auto;background:rgba(27,39,57,.92);padding:16px;border-radius:20px;box-shadow:0 10px 35px #0005}
+canvas{width:min(88vw,420px);height:min(88vw,420px);max-width:420px;max-height:420px;display:block;margin:8px auto}
+button,select{border:0;border-radius:12px;padding:13px 16px;font-size:16px;font-weight:700}
+button{background:var(--gold);color:#172033;cursor:pointer;margin:6px}
+button:disabled{opacity:.45;cursor:not-allowed}
+select{background:#293a51;color:white;width:100%;margin:8px 0}
+#status{white-space:pre-line;line-height:1.55;margin:14px auto;max-width:480px}
+#result{font-size:18px;font-weight:700;line-height:1.6;color:var(--gold);white-space:pre-line}
+.small{font-size:12px;color:#b5c1d2}
+.pointer{font-size:34px;line-height:1;margin-bottom:-5px;color:var(--gold)}
+</style>
+</head>
+<body>
+<h1>🎡 KOSHKOSHE — GEENGOO</h1>
+<p>Lakkoofsota 1 hanga 100</p>
+<div class="panel">
+  <label for="kind">Tapha filadhu</label>
+  <select id="kind"><option value="100">Abba 100 — badhaasa 1ffaa 1,000 / 2ffaa 500 birr</option><option value="200">Abba 200 — badhaasa 1ffaa 2,000 / 2ffaa 1,000 birr</option></select>
+  <div class="pointer">▼</div>
+  <canvas id="wheel" width="800" height="800" aria-label="Geengoo lakkoofsota 1 hanga 100"></canvas>
+  <button id="spin">🎡 GEENGOO NAANNESSI</button>
+  <div id="status">Odeeffannoo taphaa fe'aa jira...</div>
+  <div id="result"></div>
+  <p class="small">Geengoo kana Admin qofa naannessuu danda'a. Hirmaattota 20 guutuu qaba.</p>
+</div>
+<script>
+const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
+if (tg) { tg.ready(); tg.expand(); }
+const canvas=document.getElementById('wheel'), ctx=canvas.getContext('2d');
+const kindEl=document.getElementById('kind'), spinBtn=document.getElementById('spin');
+const statusEl=document.getElementById('status'), resultEl=document.getElementById('result');
+const N=100, step=Math.PI*2/N;
+let rotation=0, spinning=false, currentNumbers=[];
+function drawWheel(){
+  const c=canvas.width/2, r=c-12;
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  for(let i=0;i<N;i++){
+    const a=rotation+i*step-Math.PI/2;
+    ctx.beginPath();ctx.moveTo(c,c);ctx.arc(c,c,r,a,a+step);ctx.closePath();
+    ctx.fillStyle=(i%2===0)?'#1e9b68':'#253d65';ctx.fill();
+    ctx.strokeStyle='#ffffff35';ctx.lineWidth=1;ctx.stroke();
+    ctx.save();ctx.translate(c,c);ctx.rotate(a+step/2);
+    ctx.fillStyle='#fff';ctx.font='bold 17px Arial';ctx.textAlign='right';ctx.textBaseline='middle';
+    ctx.fillText(String(i+1),r-16,0);ctx.restore();
+  }
+  ctx.beginPath();ctx.arc(c,c,65,0,Math.PI*2);ctx.fillStyle='#ffd34d';ctx.fill();
+  ctx.strokeStyle='#fff';ctx.lineWidth=6;ctx.stroke();
+  ctx.fillStyle='#172033';ctx.font='bold 22px Arial';ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText('KOSHKOSHE',c,c);
+}
+drawWheel();
+function getInitData(){return tg ? tg.initData : '';}
+async function refreshStatus(){
+  const kind=kindEl.value;
+  try{
+    const r=await fetch(`/api/wheel-status?kind=${kind}`);
+    const d=await r.json();
+    if(!d.ok)throw new Error(d.error||'Odeeffannoo hin argamne.');
+    statusEl.textContent=`Tapha Abba ${kind} • Marsaa ${d.round_no}\nHirmaattota: ${d.players}/${d.max_players}`;
+    if(d.already_drawn){spinBtn.disabled=true;statusEl.textContent+='\\nGeengoon duraan naanna’eera.';resultEl.textContent=d.result||'';}
+    else if(!d.ready){spinBtn.disabled=true;statusEl.textContent+='\\nHirmaattota 20 guutuu erga ta’anii booda naannessuu dandeessa.';}
+    else{spinBtn.disabled=false;resultEl.textContent='';}
+  }catch(e){statusEl.textContent=e.message;spinBtn.disabled=true;}
+}
+function angleForNumber(n){
+  // The pointer is at top. Land the selected number's sector under the pointer.
+  const sector=(n-0.5)*step;
+  return -sector;
+}
+function animateTo(numbers){
+  return new Promise(resolve=>{
+    const targetNum=numbers[0];
+    const target=angleForNumber(targetNum);
+    const current=((rotation%(Math.PI*2))+Math.PI*2)%(Math.PI*2);
+    const normalized=((target%(Math.PI*2))+Math.PI*2)%(Math.PI*2);
+    const delta=(normalized-current+Math.PI*2)%(Math.PI*2);
+    const start=rotation, end=start+Math.PI*2*7+delta, duration=4300, t0=performance.now();
+    function frame(now){
+      const t=Math.min(1,(now-t0)/duration), ease=1-Math.pow(1-t,4);
+      rotation=start+(end-start)*ease;drawWheel();
+      if(t<1)requestAnimationFrame(frame);else{rotation=end;drawWheel();resolve();}
+    }
+    requestAnimationFrame(frame);
+  });
+}
+spinBtn.addEventListener('click',async()=>{
+  if(spinning)return;
+  if(!tg || !getInitData()){
+    statusEl.textContent='Telegram keessaa admin account kee fayyadamuun Web App bani. Link browser alaa irraa hin hojjetu.';
+    return;
+  }
+  spinning=true;spinBtn.disabled=true;resultEl.textContent='';statusEl.textContent='🎡 Geengoon naanna’aa jira...';
+  try{
+    const response=await fetch('/api/spin',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({kind:kindEl.value,initData:getInitData()})});
+    const data=await response.json();
+    if(!response.ok||!data.ok)throw new Error(data.error||'Geengoo naannessuun hin milkoofne.');
+    currentNumbers=data.numbers||[];
+    await animateTo([currentNumbers[0]]);
+    statusEl.textContent='🎯 Lakkoofsi jalqabaa baheera. Geengoon yeroo lammaffaa naanna’aa jira...';
+    await new Promise(resolve => setTimeout(resolve, 700));
+    await animateTo([currentNumbers[1]]);
+    statusEl.textContent='✅ Geengoon lakkoofsota lama baaseera!';
+    resultEl.textContent=data.result||'Bu’aan hin argamne.';
+    spinBtn.disabled=true;
+  }catch(e){statusEl.textContent=e.message;await refreshStatus();}
+  finally{spinning=false;}
+});
+kindEl.addEventListener('change',()=>{resultEl.textContent='';refreshStatus();});
+refreshStatus();
+</script>
+</body>
+</html>
