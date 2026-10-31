@@ -1,124 +1,692 @@
-<!doctype html>
-<html lang="om">
+<!DOCTYPE html>
+<html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
-<title>Koshkoshe — Geengoo</title>
-<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PETROS & TOLERA DIGITAL EKUB</title>
+
 <style>
-:root{color-scheme:dark;--bg:#101827;--panel:#1b2739;--gold:#ffd34d;--green:#20b86a;--text:#f5f7fb}
-*{box-sizing:border-box}
-body{margin:0;background:radial-gradient(circle at top,#253a56,#101827 60%);color:var(--text);font-family:Arial,sans-serif;text-align:center;padding:18px 12px 30px}
-h1{font-size:23px;margin:8px 0 5px}p{color:#d2d9e5;margin:6px}
-.panel{max-width:520px;margin:14px auto;background:rgba(27,39,57,.92);padding:16px;border-radius:20px;box-shadow:0 10px 35px #0005}
-canvas{width:min(88vw,420px);height:min(88vw,420px);max-width:420px;max-height:420px;display:block;margin:8px auto}
-button,select{border:0;border-radius:12px;padding:13px 16px;font-size:16px;font-weight:700}
-button{background:var(--gold);color:#172033;cursor:pointer;margin:6px}
-button:disabled{opacity:.45;cursor:not-allowed}
-select{background:#293a51;color:white;width:100%;margin:8px 0}
-#status{white-space:pre-line;line-height:1.55;margin:14px auto;max-width:480px}
-#result{font-size:18px;font-weight:700;line-height:1.6;color:var(--gold);white-space:pre-line}
-.small{font-size:12px;color:#b5c1d2}
-.pointer{font-size:34px;line-height:1;margin-bottom:-5px;color:var(--gold)}
+*{
+    margin:0;
+    padding:0;
+    box-sizing:border-box;
+    font-family:Arial,sans-serif;
+}
+
+body{
+    background:#081426;
+    color:white;
+}
+
+header{
+    background:linear-gradient(135deg,#102d50,#071323);
+    padding:25px 15px;
+    text-align:center;
+    border-bottom:2px solid #e9b83f;
+}
+
+.logo{
+    font-size:27px;
+    font-weight:bold;
+    color:#ffd44d;
+}
+
+header p{
+    margin-top:8px;
+    color:#d4dce8;
+}
+
+nav{
+    display:flex;
+    overflow-x:auto;
+    background:#10233c;
+    padding:12px;
+    gap:8px;
+}
+
+nav button{
+    border:0;
+    padding:11px 17px;
+    background:#203a59;
+    color:white;
+    border-radius:8px;
+    white-space:nowrap;
+    cursor:pointer;
+}
+
+nav button.active{
+    background:#e5b52d;
+    color:#101b2b;
+    font-weight:bold;
+}
+
+.container{
+    max-width:1100px;
+    margin:auto;
+    padding:15px;
+}
+
+.page{
+    display:none;
+}
+
+.page.active{
+    display:block;
+}
+
+.hero{
+    background:linear-gradient(135deg,#164b70,#10213c);
+    padding:30px 20px;
+    border-radius:15px;
+    text-align:center;
+    margin-bottom:20px;
+}
+
+.hero h1{
+    color:#ffd44d;
+    font-size:26px;
+    margin-bottom:12px;
+}
+
+.hero p{
+    color:#e0e8f1;
+    line-height:1.7;
+}
+
+.btn{
+    border:0;
+    padding:13px 22px;
+    background:#ffd43b;
+    color:#142238;
+    font-weight:bold;
+    border-radius:9px;
+    margin-top:15px;
+    cursor:pointer;
+}
+
+.stats{
+    display:grid;
+    grid-template-columns:repeat(2,1fr);
+    gap:12px;
+    margin-bottom:20px;
+}
+
+.card{
+    background:#142944;
+    padding:20px 12px;
+    border-radius:12px;
+    text-align:center;
+    border:1px solid #29415f;
+}
+
+.card h2{
+    color:#ffd44d;
+    font-size:23px;
+    margin-bottom:8px;
+}
+
+.card p{
+    color:#c7d4e4;
+    font-size:13px;
+}
+
+.section-title{
+    color:#ffd44d;
+    margin:22px 0 15px;
+    font-size:21px;
+}
+
+.prizes{
+    display:grid;
+    grid-template-columns:1fr;
+    gap:12px;
+}
+
+.prize{
+    padding:22px;
+    text-align:center;
+    background:linear-gradient(120deg,#183c5c,#14243b);
+    border-radius:12px;
+    border:1px solid #d9ae39;
+}
+
+.prize h2{
+    color:#ffd44d;
+    font-size:25px;
+    margin:10px;
+}
+
+.prize span{
+    color:#d6e2ed;
+}
+
+.ticket-info{
+    display:flex;
+    gap:15px;
+    flex-wrap:wrap;
+    margin:15px 0;
+}
+
+.legend{
+    display:flex;
+    align-items:center;
+    gap:7px;
+    font-size:13px;
+}
+
+.dot{
+    width:13px;
+    height:13px;
+    display:inline-block;
+    border-radius:3px;
+}
+
+.available{background:#36c878;}
+.sold{background:#ed4242;}
+
+.search{
+    width:100%;
+    padding:14px;
+    background:#142944;
+    border:1px solid #49617b;
+    color:white;
+    border-radius:8px;
+    margin:10px 0;
+}
+
+.ticket-grid{
+    display:grid;
+    grid-template-columns:repeat(6,1fr);
+    gap:5px;
+    max-height:500px;
+    overflow-y:auto;
+    padding:5px;
+    background:#0c1d32;
+    border-radius:10px;
+}
+
+.ticket{
+    padding:9px 2px;
+    background:#36c878;
+    color:#061d12;
+    font-weight:bold;
+    font-size:11px;
+    text-align:center;
+    border-radius:5px;
+}
+
+.ticket.sold{
+    background:#ed4242;
+    color:white;
+}
+
+.ticket.selected{
+    outline:3px solid #ffd44d;
+}
+
+input,select{
+    width:100%;
+    padding:14px;
+    margin:8px 0;
+    border-radius:8px;
+    background:#203a59;
+    border:1px solid #49617b;
+    color:white;
+}
+
+.form-box{
+    background:#142944;
+    padding:20px;
+    border-radius:12px;
+    margin-bottom:20px;
+}
+
+footer{
+    margin-top:35px;
+    background:#06101e;
+    text-align:center;
+    padding:25px 10px;
+    color:#a9bbce;
+    line-height:1.8;
+}
+
+@media(min-width:650px){
+    .stats{
+        grid-template-columns:repeat(4,1fr);
+    }
+
+    .prizes{
+        grid-template-columns:repeat(3,1fr);
+    }
+
+    .ticket-grid{
+        grid-template-columns:repeat(12,1fr);
+    }
+}
 </style>
 </head>
+
 <body>
-<h1>🎡 KOSHKOSHE — GEENGOO</h1>
-<p>Lakkoofsota 1 hanga 100</p>
-<div class="panel">
-  <label for="kind">Tapha filadhu</label>
-  <select id="kind"><option value="100">Abba 100 — badhaasa 1ffaa 1,000 / 2ffaa 500 birr</option><option value="200">Abba 200 — badhaasa 1ffaa 2,000 / 2ffaa 1,000 birr</option></select>
-  <div class="pointer">▼</div>
-  <canvas id="wheel" width="800" height="800" aria-label="Geengoo lakkoofsota 1 hanga 100"></canvas>
-  <button id="spin">🎡 GEENGOO NAANNESSI</button>
-  <div id="status">Odeeffannoo taphaa fe'aa jira...</div>
-  <div id="result"></div>
-  <p class="small">Geengoo kana Admin qofa naannessuu danda'a. Hirmaattota 20 guutuu qaba.</p>
+
+<header>
+    <div class="logo">🏆 PETROS & TOLERA</div>
+    <p>DIGITAL EKUB</p>
+    <p>Carraa Kee • Badhaasa Guddaa</p>
+</header>
+
+<nav>
+    <button class="active" onclick="showPage('home',this)">🏠 Home</button>
+    <button onclick="showPage('tickets',this)">🎟️ Tickets</button>
+    <button onclick="showPage('payment',this)">💰 Payment</button>
+    <button onclick="showPage('profile',this)">👤 Profile</button>
+    <button onclick="showPage('history',this)">📜 History</button>
+    <button onclick="showPage('winners',this)">🏆 Winners</button>
+</nav>
+
+<div class="container">
+
+<!-- HOME -->
+
+<section id="home" class="page active">
+
+<div class="hero">
+    <h1>WELCOME TO DIGITAL EKUB</h1>
+    <p>
+        PETROS & TOLERA DIGITAL EKUB
+        <br>
+        Carraa kee argadhu, badhaasa guddaa mo'adhu!
+        <br>
+        Miseensi tokko kaffaltii 200 Birr kaffalee
+        ticket carraa tokko argata.
+    </p>
+
+    <button class="btn" onclick="showPage('payment')">
+        JOIN NOW
+    </button>
 </div>
+
+<div class="stats">
+    <div class="card">
+        <h2>6,000</h2>
+        <p>Total Tickets</p>
+    </div>
+
+    <div class="card">
+        <h2>200 ETB</h2>
+        <p>Membership Payment</p>
+    </div>
+
+    <div class="card">
+        <h2 id="soldCount">0</h2>
+        <p>Tickets Sold</p>
+    </div>
+
+    <div class="card">
+        <h2 id="availableCount">6000</h2>
+        <p>Available Tickets</p>
+    </div>
+</div>
+
+<h2 class="section-title">🎁 OUR PRIZES</h2>
+
+<div class="prizes">
+
+    <div class="prize">
+        <span>🥇 FIRST PRIZE</span>
+        <h2>500,000</h2>
+        <span>Birr</span>
+    </div>
+
+    <div class="prize">
+        <span>🥈 SECOND PRIZE</span>
+        <h2>30,000</h2>
+        <span>Birr</span>
+    </div>
+
+    <div class="prize">
+        <span>🥉 THIRD PRIZE</span>
+        <h2>20,000</h2>
+        <span>Birr</span>
+    </div>
+
+</div>
+
+<h2 class="section-title">🎟️ TICKET INFORMATION</h2>
+
+<div class="card">
+    <h2>1 - 6000</h2>
+    <p>Ticket numbers available for this Ekub.</p>
+    <p style="margin-top:10px">Winner will be announced when ticket sales close.</p>
+    <button class="btn" onclick="showPage('tickets')">
+        VIEW ALL TICKETS
+    </button>
+</div>
+
+</section>
+
+<!-- TICKETS -->
+
+<section id="tickets" class="page">
+
+<h2 class="section-title">🎟️ ALL TICKETS</h2>
+
+<div class="ticket-info">
+    <div class="legend">
+        <span class="dot available"></span>
+        Available
+    </div>
+
+    <div class="legend">
+        <span class="dot sold"></span>
+        Sold
+    </div>
+</div>
+
+<input
+    class="search"
+    id="ticketSearch"
+    placeholder="Search ticket number..."
+    oninput="searchTickets()"
+>
+
+<div class="ticket-grid" id="ticketGrid"></div>
+
+</section>
+
+<!-- PAYMENT -->
+
+<section id="payment" class="page">
+
+<h2 class="section-title">💰 JOIN DIGITAL EKUB</h2>
+
+<div class="form-box">
+
+    <h3>Membership Payment</h3>
+
+    <p style="margin:15px 0;color:#ffd44d">
+        Payment Amount: 200 ETB
+    </p>
+
+    <input id="fullName" placeholder="Full Name">
+
+    <input id="phone" placeholder="Phone Number">
+
+    <select id="paymentMethod">
+        <option value="">Select Payment Method</option>
+        <option>Telebirr</option>
+        <option>Commercial Bank of Ethiopia</option>
+        <option>Awash Bank</option>
+    </select>
+
+    <input id="transaction" placeholder="Transaction Reference Number">
+
+    <button class="btn" onclick="submitPayment()">
+        SUBMIT PAYMENT
+    </button>
+
+    <p style="margin-top:15px;color:#aebfd0;font-size:13px">
+        Your payment must be verified by the administrator.
+        Your ticket will be assigned after approval.
+    </p>
+
+</div>
+
+</section>
+
+<!-- PROFILE -->
+
+<section id="profile" class="page">
+
+<h2 class="section-title">👤 MY PROFILE</h2>
+
+<div class="form-box">
+    <p>Name: <span id="profileName">Not registered</span></p>
+    <br>
+    <p>Phone: <span id="profilePhone">Not registered</span></p>
+    <br>
+    <p>Membership: <span id="profileStatus">Not confirmed</span></p>
+    <br>
+    <p>My Ticket: <span id="myTicket">Not assigned</span></p>
+</div>
+
+</section>
+
+<!-- HISTORY -->
+
+<section id="history" class="page">
+
+<h2 class="section-title">📜 PAYMENT HISTORY</h2>
+
+<div class="form-box" id="historyList">
+    <p>No payment records yet.</p>
+</div>
+
+</section>
+
+<!-- WINNERS -->
+
+<section id="winners" class="page">
+
+<h2 class="section-title">🏆 OUR WINNERS</h2>
+
+<div class="prizes">
+
+    <div class="prize">
+        <span>🥇 FIRST WINNER</span>
+        <h2>500,000 ETB</h2>
+        <p>Not announced</p>
+    </div>
+
+    <div class="prize">
+        <span>🥈 SECOND WINNER</span>
+        <h2>30,000 ETB</h2>
+        <p>Not announced</p>
+    </div>
+
+    <div class="prize">
+        <span>🥉 THIRD WINNER</span>
+        <h2>20,000 ETB</h2>
+        <p>Not announced</p>
+    </div>
+
+</div>
+
+</section>
+
+</div>
+
+<footer>
+    <h3 style="color:#ffd44d">PETROS & TOLERA DIGITAL EKUB</h3>
+    <p>Trust • Transparency • Opportunity</p>
+    <p>© 2026 All Rights Reserved</p>
+</footer>
+
 <script>
-const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
-if (tg) { tg.ready(); tg.expand(); }
-const canvas=document.getElementById('wheel'), ctx=canvas.getContext('2d');
-const kindEl=document.getElementById('kind'), spinBtn=document.getElementById('spin');
-const statusEl=document.getElementById('status'), resultEl=document.getElementById('result');
-const N=100, step=Math.PI*2/N;
-let rotation=0, spinning=false, currentNumbers=[];
-function drawWheel(){
-  const c=canvas.width/2, r=c-12;
-  ctx.clearRect(0,0,canvas.width,canvas.height);
-  for(let i=0;i<N;i++){
-    const a=rotation+i*step-Math.PI/2;
-    ctx.beginPath();ctx.moveTo(c,c);ctx.arc(c,c,r,a,a+step);ctx.closePath();
-    ctx.fillStyle=(i%2===0)?'#1e9b68':'#253d65';ctx.fill();
-    ctx.strokeStyle='#ffffff35';ctx.lineWidth=1;ctx.stroke();
-    ctx.save();ctx.translate(c,c);ctx.rotate(a+step/2);
-    ctx.fillStyle='#fff';ctx.font='bold 17px Arial';ctx.textAlign='right';ctx.textBaseline='middle';
-    ctx.fillText(String(i+1),r-16,0);ctx.restore();
-  }
-  ctx.beginPath();ctx.arc(c,c,65,0,Math.PI*2);ctx.fillStyle='#ffd34d';ctx.fill();
-  ctx.strokeStyle='#fff';ctx.lineWidth=6;ctx.stroke();
-  ctx.fillStyle='#172033';ctx.font='bold 22px Arial';ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText('KOSHKOSHE',c,c);
+
+// PAGE NAVIGATION
+
+function showPage(id,btn){
+
+    document.querySelectorAll('.page').forEach(p=>{
+        p.classList.remove('active');
+    });
+
+    document.getElementById(id).classList.add('active');
+
+    document.querySelectorAll('nav button').forEach(b=>{
+        b.classList.remove('active');
+    });
+
+    if(btn) btn.classList.add('active');
 }
-drawWheel();
-function getInitData(){return tg ? tg.initData : '';}
-async function refreshStatus(){
-  const kind=kindEl.value;
-  try{
-    const r=await fetch(`/api/wheel-status?kind=${kind}`);
-    const d=await r.json();
-    if(!d.ok)throw new Error(d.error||'Odeeffannoo hin argamne.');
-    statusEl.textContent=`Tapha Abba ${kind} • Marsaa ${d.round_no}\nHirmaattota: ${d.players}/${d.max_players}`;
-    if(d.already_drawn){spinBtn.disabled=true;statusEl.textContent+='\\nGeengoon duraan naanna’eera.';resultEl.textContent=d.result||'';}
-    else if(!d.ready){spinBtn.disabled=true;statusEl.textContent+='\\nHirmaattota 20 guutuu erga ta’anii booda naannessuu dandeessa.';}
-    else{spinBtn.disabled=false;resultEl.textContent='';}
-  }catch(e){statusEl.textContent=e.message;spinBtn.disabled=true;}
-}
-function angleForNumber(n){
-  // The pointer is at top. Land the selected number's sector under the pointer.
-  const sector=(n-0.5)*step;
-  return -sector;
-}
-function animateTo(numbers){
-  return new Promise(resolve=>{
-    const targetNum=numbers[0];
-    const target=angleForNumber(targetNum);
-    const current=((rotation%(Math.PI*2))+Math.PI*2)%(Math.PI*2);
-    const normalized=((target%(Math.PI*2))+Math.PI*2)%(Math.PI*2);
-    const delta=(normalized-current+Math.PI*2)%(Math.PI*2);
-    const start=rotation, end=start+Math.PI*2*7+delta, duration=4300, t0=performance.now();
-    function frame(now){
-      const t=Math.min(1,(now-t0)/duration), ease=1-Math.pow(1-t,4);
-      rotation=start+(end-start)*ease;drawWheel();
-      if(t<1)requestAnimationFrame(frame);else{rotation=end;drawWheel();resolve();}
+
+// TICKET SYSTEM
+
+const TOTAL_TICKETS = 6000;
+
+// Empty until real backend provides confirmed sales.
+// Example: const soldTickets = [1, 5, 20];
+
+const soldTickets = [];
+
+const grid = document.getElementById('ticketGrid');
+
+function loadTickets(){
+
+    grid.innerHTML = '';
+
+    let sold = soldTickets.length;
+
+    for(let i=1;i<=TOTAL_TICKETS;i++){
+
+        let ticket = document.createElement('div');
+
+        ticket.className = 'ticket';
+
+        ticket.textContent = i;
+
+        if(soldTickets.includes(i)){
+            ticket.classList.add('sold');
+        }
+
+        ticket.dataset.number = i;
+
+        grid.appendChild(ticket);
     }
-    requestAnimationFrame(frame);
-  });
+
+    document.getElementById('soldCount').textContent = sold;
+
+    document.getElementById('availableCount').textContent =
+        TOTAL_TICKETS-sold;
 }
-spinBtn.addEventListener('click',async()=>{
-  if(spinning)return;
-  if(!tg || !getInitData()){
-    statusEl.textContent='Telegram keessaa admin account kee fayyadamuun Web App bani. Link browser alaa irraa hin hojjetu.';
-    return;
-  }
-  spinning=true;spinBtn.disabled=true;resultEl.textContent='';statusEl.textContent='🎡 Geengoon naanna’aa jira...';
-  try{
-    const response=await fetch('/api/spin',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({kind:kindEl.value,initData:getInitData()})});
-    const data=await response.json();
-    if(!response.ok||!data.ok)throw new Error(data.error||'Geengoo naannessuun hin milkoofne.');
-    currentNumbers=data.numbers||[];
-    await animateTo([currentNumbers[0]]);
-    statusEl.textContent='🎯 Lakkoofsi jalqabaa baheera. Geengoon yeroo lammaffaa naanna’aa jira...';
-    await new Promise(resolve => setTimeout(resolve, 700));
-    await animateTo([currentNumbers[1]]);
-    statusEl.textContent='✅ Geengoon lakkoofsota lama baaseera!';
-    resultEl.textContent=data.result||'Bu’aan hin argamne.';
-    spinBtn.disabled=true;
-  }catch(e){statusEl.textContent=e.message;await refreshStatus();}
-  finally{spinning=false;}
-});
-kindEl.addEventListener('change',()=>{resultEl.textContent='';refreshStatus();});
-refreshStatus();
+
+function searchTickets(){
+
+    let value = document.getElementById('ticketSearch')
+        .value.trim();
+
+    document.querySelectorAll('.ticket').forEach(ticket=>{
+
+        ticket.style.display =
+            ticket.textContent.includes(value) ? '' : 'none';
+
+    });
+}
+
+// PAYMENT DEMO
+
+function submitPayment(){
+
+    let name = document.getElementById('fullName').value.trim();
+
+    let phone = document.getElementById('phone').value.trim();
+
+    let method = document.getElementById('paymentMethod').value;
+
+    let reference = document.getElementById('transaction').value.trim();
+
+    if(!name || !phone || !method || !reference){
+
+        alert('Please fill in all payment details.');
+
+        return;
+    }
+
+    let record = {
+        name:name,
+        phone:phone,
+        method:method,
+        reference:reference,
+        amount:200,
+        status:'PENDING',
+        date:new Date().toLocaleString()
+    };
+
+    let history = JSON.parse(
+        localStorage.getItem('ekub_history') || '[]'
+    );
+
+    history.push(record);
+
+    localStorage.setItem('ekub_history',JSON.stringify(history));
+
+    localStorage.setItem('ekub_user',JSON.stringify({
+        name:name,
+        phone:phone
+    }));
+
+    alert('Payment request saved. Waiting for admin approval.');
+
+    loadProfile();
+
+    loadHistory();
+}
+
+// PROFILE
+
+function loadProfile(){
+
+    let user = JSON.parse(
+        localStorage.getItem('ekub_user') || 'null'
+    );
+
+    if(user){
+
+        document.getElementById('profileName').textContent=user.name;
+
+        document.getElementById('profilePhone').textContent=user.phone;
+    }
+}
+
+// HISTORY
+
+function loadHistory(){
+
+    let history = JSON.parse(
+        localStorage.getItem('ekub_history') || '[]'
+    );
+
+    let box = document.getElementById('historyList');
+
+    if(history.length===0){
+
+        box.innerHTML='<p>No payment records yet.</p>';
+
+        return;
+    }
+
+    box.innerHTML='';
+
+    history.forEach(item=>{
+
+        let div=document.createElement('div');
+
+        div.style.padding='12px';
+
+        div.style.borderBottom='1px solid #49617b';
+
+        let title=document.createElement('strong');
+        title.textContent=item.name+' - '+item.amount+' ETB';
+
+        let details=document.createElement('p');
+        details.textContent=
+            item.method+' | '+item.reference+' | '+item.date;
+
+        let status=document.createElement('p');
+        status.textContent='Status: '+item.status;
+        status.style.color='#ffd44d';
+
+        div.append(title,details,status);
+
+        box.appendChild(div);
+    });
+}
+
+loadTickets();
+loadProfile();
+loadHistory();
+
 </script>
+
 </body>
-</html>
+  </html>
