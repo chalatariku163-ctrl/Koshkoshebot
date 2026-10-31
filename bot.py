@@ -1,659 +1,1598 @@
 import os
+import time
 import random
-import logging
-import threading
-import asyncio
 import sqlite3
-import hmac
-import hashlib
-import json
-import urllib.parse
+import threading
+import logging
+import requests
 
-from datetime import datetime, timezone
-from flask import Flask, jsonify, request, send_from_directory
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
-from telegram.ext import (
-    Application, CommandHandler, CallbackQueryHandler,
-    MessageHandler, ContextTypes, filters,
-)
+from datetime import datetime
+from flask import Flask, request, jsonify, send_file
 
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
-)
-logger = logging.getLogger(__name__)
+# =====================================
+# CONFIGURATION
+# =====================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-WEBAPP_URL = os.getenv("WEBAPP_URL", "").strip().rstrip("/")
-DATABASE_PATH = os.getenv("DATABASE_PATH", "/var/data/koshkoshe.db")
-if not os.path.isdir(os.path.dirname(DATABASE_PATH) or "."):
-    DATABASE_PATH = "koshkoshe.db"
+WEBAPP_URL = os.getenv("WEBAPP_URL", "").strip()
+
+DATABASE_PATH = os.getenv(
+    "DATABASE_PATH",
+    "/var/data/iqub.db"
+)
+
+PAYMENT_AMOUNT = 200
+TOTAL_TICKETS = 6000
+
+FIRST_PRIZE = 500000
+SECOND_PRIZE = 30000
+THIRD_PRIZE = 20000
+
+BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 app = Flask(__name__)
-MAX_PLAYERS = 20
-game_lock = threading.RLock()
 
-GAMES = {
-    "100": {"price": 100, "prizes": [1000, 500]},
-    "200": {"price": 200, "prizes": [2000, 1000]},
-}
-PAYMENT_METHODS = {
-    "telebirr1": {"name": "Telebirr - Chala", "details": "0902640434", "owner": "Chala"},
-    "telebirr2": {"name": "Telebirr - Sanyi", "details": "0945311726", "owner": "Sanyi"},
-    "cbe": {"name": "CBE Bank", "details": "1000193661991", "owner": "Chala"},
-    "awash": {"name": "Awash Bank", "details": "01320058936200", "owner": "Chala"},
-}
+logging.basicConfig(level=logging.INFO)
 
-def now_text():
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+logger = logging.getLogger(__name__)
+
+db_lock = threading.RLock()
+polling_started = False
+polling_lock = threading.Lock()
+
+
+# =====================================
+# DATABASE
+# =====================================
 
 def get_db():
-    db = sqlite3.connect(DATABASE_PATH, timeout=30)
-    db.row_factory = sqlite3.Row
-    db.execute("PRAGMA busy_timeout = 30000")
-    db.execute("PRAGMA foreign_keys = ON")
-    return db
+
+    folder = os.path.dirname(DATABASE_PATH)
+
+    if folder:
+        os.makedirs(folder, exist_ok=True)
+
+    conn = sqlite3.connect(
+        DATABASE_PATH,
+        timeout=30
+    )
+
+    conn.row_factory = sqlite3.Row
+
+    return conn
+
 
 def init_db():
-    with get_db() as db:
-        db.execute("""CREATE TABLE IF NOT EXISTS game_state (
-            kind TEXT PRIMARY KEY, finished INTEGER NOT NULL DEFAULT 0,
-            round_no INTEGER NOT NULL DEFAULT 1)""")
-        # Migrate an older database made by the previous bot version.
-        cols = {r["name"] for r in db.execute("PRAGMA table_info(game_state)")}
-        if "round_no" not in cols:
-            db.execute("ALTER TABLE game_state ADD COLUMN round_no INTEGER NOT NULL DEFAULT 1")
-        db.execute("""CREATE TABLE IF NOT EXISTS players (
-            kind TEXT NOT NULL, user_id INTEGER NOT NULL, name TEXT NOT NULL,
-            group_start INTEGER NOT NULL, created_at TEXT NOT NULL,
-            PRIMARY KEY(kind,user_id), UNIQUE(kind,group_start),
-            CHECK(group_start >= 1), CHECK(group_start <= 96),
-            CHECK((group_start - 1) % 5 = 0))""")
-        db.execute("""CREATE TABLE IF NOT EXISTS game_results (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL,
-            result TEXT NOT NULL, created_at TEXT NOT NULL)""")
-        db.execute("""CREATE TABLE IF NOT EXISTS balances (
-            user_id INTEGER PRIMARY KEY, name TEXT NOT NULL DEFAULT '',
-            amount INTEGER NOT NULL DEFAULT 0 CHECK(amount >= 0),
-            updated_at TEXT NOT NULL)""")
-        db.execute("""CREATE TABLE IF NOT EXISTS deposits (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL,
-            username TEXT NOT NULL DEFAULT '', method TEXT NOT NULL,
-            amount INTEGER NOT NULL CHECK(amount > 0),
-            status TEXT NOT NULL DEFAULT 'awaiting_receipt',
-            receipt_file_id TEXT NOT NULL DEFAULT '', receipt_type TEXT NOT NULL DEFAULT '',
-            receipt_text TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
-            reviewed_at TEXT NOT NULL DEFAULT '', reviewed_by INTEGER NOT NULL DEFAULT 0)""")
-        db.execute("""CREATE TABLE IF NOT EXISTS balance_transactions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL,
-            amount INTEGER NOT NULL, transaction_type TEXT NOT NULL,
-            description TEXT NOT NULL, created_at TEXT NOT NULL)""")
-        db.execute("""CREATE TABLE IF NOT EXISTS game_views (
-            kind TEXT NOT NULL, user_id INTEGER NOT NULL, chat_id INTEGER NOT NULL,
-            message_id INTEGER NOT NULL, updated_at TEXT NOT NULL,
-            PRIMARY KEY(kind,user_id))""")
-        # Unique per round: prevents a second spin/payout for the same round.
-        db.execute("""CREATE TABLE IF NOT EXISTS game_draws (
-            kind TEXT NOT NULL, round_no INTEGER NOT NULL, numbers TEXT NOT NULL,
-            result TEXT NOT NULL, created_at TEXT NOT NULL,
-            PRIMARY KEY(kind,round_no))""")
-        for kind in GAMES:
-            db.execute("""INSERT OR IGNORE INTO game_state(kind,finished,round_no)
-                          VALUES (?,0,1)""", (kind,))
 
-def ensure_balance_user(db, user_id, name):
-    db.execute("""INSERT OR IGNORE INTO balances(user_id,name,amount,updated_at)
-                  VALUES(?,?,0,?)""", (user_id, name, now_text()))
-    db.execute("UPDATE balances SET name=?,updated_at=? WHERE user_id=?",
-               (name, now_text(), user_id))
+    with db_lock:
 
-def get_balance(user_id):
-    with get_db() as db:
-        row = db.execute("SELECT amount FROM balances WHERE user_id=?", (user_id,)).fetchone()
-    return row["amount"] if row else 0
+        conn = get_db()
 
-def get_game_info(kind):
-    with get_db() as db:
-        row = db.execute("SELECT finished,round_no FROM game_state WHERE kind=?", (kind,)).fetchone()
-    return dict(row) if row else {"finished": False, "round_no": 1}
+        conn.execute("PRAGMA journal_mode=WAL")
 
-def get_players(kind):
-    with get_db() as db:
-        rows = db.execute("SELECT user_id,name,group_start,created_at FROM players WHERE kind=? ORDER BY group_start", (kind,)).fetchall()
-    return [dict(r) for r in rows]
+        conn.executescript("""
 
-def get_player_count(kind):
-    with get_db() as db:
-        return db.execute("SELECT COUNT(*) AS n FROM players WHERE kind=?", (kind,)).fetchone()["n"]
+        CREATE TABLE IF NOT EXISTS users (
 
-def get_user_player(kind, user_id):
-    with get_db() as db:
-        row = db.execute("SELECT * FROM players WHERE kind=? AND user_id=?", (kind,user_id)).fetchone()
-    return dict(row) if row else None
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            telegram_id INTEGER UNIQUE NOT NULL,
+            full_name TEXT NOT NULL,
+            phone TEXT DEFAULT '',
+            created_at TEXT
 
-def get_occupied_groups(kind):
-    with get_db() as db:
-        rows = db.execute("SELECT group_start,user_id,name FROM players WHERE kind=?", (kind,)).fetchall()
-    return {r["group_start"]: dict(r) for r in rows}
+        );
 
-@app.get("/")
-def home():
-    return "Koshkoshe Bot is running!"
+        CREATE TABLE IF NOT EXISTS payments (
 
-@app.get("/health")
-def health():
-    return jsonify({"status":"ok","database":os.path.exists(DATABASE_PATH)})
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            amount INTEGER NOT NULL,
+            payment_method TEXT,
+            transaction_reference TEXT,
+            status TEXT DEFAULT 'PENDING',
+            ticket_number INTEGER UNIQUE,
+            created_at TEXT,
+            approved_at TEXT,
 
-@app.get("/wheel")
-def wheel_page():
-    return send_from_directory(os.path.dirname(os.path.abspath(__file__)), "index.html")
+            FOREIGN KEY(user_id)
+            REFERENCES users(id)
 
-def verify_telegram_init_data(init_data):
-    """Verify Telegram Web App initData; never trust a user ID supplied by browser alone."""
-    if not BOT_TOKEN or not init_data:
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_payment_status
+        ON payments(status);
+
+        CREATE INDEX IF NOT EXISTS idx_user_telegram
+        ON users(telegram_id);
+
+        """)
+
+        conn.commit()
+        conn.close()
+
+
+init_db()
+
+
+# =====================================
+# TELEGRAM API
+# =====================================
+
+def telegram(method, data=None):
+
+    if not BOT_TOKEN:
+        logger.error("BOT_TOKEN missing")
         return None
+
     try:
-        parsed = dict(urllib.parse.parse_qsl(init_data, keep_blank_values=True))
-        received_hash = parsed.pop("hash", None)
-        if not received_hash:
-            return None
-        data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(parsed.items()))
-        secret_key = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
-        calculated = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(calculated, received_hash):
-            return None
-        auth_date = int(parsed.get("auth_date", "0"))
-        if abs(int(datetime.now(timezone.utc).timestamp()) - auth_date) > 86400:
-            return None
-        user_data = json.loads(parsed.get("user", "{}"))
-        return int(user_data.get("id", 0))
-    except (ValueError, TypeError, json.JSONDecodeError):
+
+        response = requests.post(
+            f"{BASE_URL}/{method}",
+            json=data or {},
+            timeout=40
+        )
+
+        result = response.json()
+
+        if not result.get("ok"):
+            logger.error("Telegram API: %s", result)
+
+        return result
+
+    except Exception as e:
+
+        logger.exception("Telegram error: %s", e)
+
         return None
 
-@app.get("/api/wheel-status")
-def wheel_status():
-    kind = request.args.get("kind", "")
-    if kind not in GAMES:
-        return jsonify({"ok":False,"error":"Tapha sirrii miti."}), 400
-    info = get_game_info(kind)
-    count = get_player_count(kind)
-    with get_db() as db:
-        draw = db.execute("SELECT numbers,result FROM game_draws WHERE kind=? AND round_no=?",
-                          (kind, info["round_no"])).fetchone()
-    return jsonify({
-        "ok": True, "kind":kind, "round_no":info["round_no"],
-        "players":count, "max_players":MAX_PLAYERS,
-        "ready": count == MAX_PLAYERS and bool(info["finished"]),
-        "already_drawn": draw is not None,
-        "result": draw["result"] if draw else ""
+
+def send_message(chat_id, text, keyboard=None):
+
+    data = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "HTML"
+    }
+
+    if keyboard:
+        data["reply_markup"] = keyboard
+
+    return telegram("sendMessage", data)
+
+
+def answer_callback(callback_id, text):
+
+    return telegram(
+        "answerCallbackQuery",
+        {
+            "callback_query_id": callback_id,
+            "text": text
+        }
+    )
+
+
+# =====================================
+# USER MANAGEMENT
+# =====================================
+
+def register_user(
+    telegram_id,
+    full_name,
+    phone=""
+):
+
+    with db_lock:
+
+        conn = get_db()
+
+        conn.execute("""
+
+        INSERT INTO users (
+            telegram_id,
+            full_name,
+            phone,
+            created_at
+        )
+
+        VALUES (?, ?, ?, ?)
+
+        ON CONFLICT(telegram_id)
+
+        DO UPDATE SET
+
+            full_name=excluded.full_name,
+
+            phone=CASE
+                WHEN excluded.phone != ''
+                THEN excluded.phone
+                ELSE users.phone
+            END
+
+        """, (
+
+            telegram_id,
+            full_name,
+            phone,
+            datetime.now().isoformat()
+
+        ))
+
+        conn.commit()
+
+        user = conn.execute("""
+
+        SELECT *
+        FROM users
+        WHERE telegram_id=?
+
+        """, (telegram_id,)).fetchone()
+
+        conn.close()
+
+        return dict(user)
+
+
+def get_user(telegram_id):
+
+    conn = get_db()
+
+    user = conn.execute("""
+
+    SELECT *
+    FROM users
+    WHERE telegram_id=?
+
+    """, (telegram_id,)).fetchone()
+
+    conn.close()
+
+    return dict(user) if user else None
+
+
+# =====================================
+# TICKET GENERATION
+# =====================================
+
+def generate_ticket(conn):
+
+    used = {
+
+        row["ticket_number"]
+
+        for row in conn.execute("""
+
+        SELECT ticket_number
+        FROM payments
+        WHERE status='APPROVED'
+        AND ticket_number IS NOT NULL
+
+        """).fetchall()
+
+    }
+
+    available = [
+
+        number
+
+        for number in range(1, TOTAL_TICKETS + 1)
+
+        if number not in used
+
+    ]
+
+    if not available:
+        return None
+
+    return random.choice(available)
+
+
+# =====================================
+# PAYMENT CREATION
+# =====================================
+
+def create_payment(
+    telegram_id,
+    full_name,
+    phone,
+    method,
+    reference
+):
+
+    user = register_user(
+        telegram_id,
+        full_name,
+        phone
+    )
+
+    with db_lock:
+
+        conn = get_db()
+
+        cursor = conn.execute("""
+
+        INSERT INTO payments (
+
+            user_id,
+            amount,
+            payment_method,
+            transaction_reference,
+            status,
+            created_at
+
+        )
+
+        VALUES (?, ?, ?, ?, 'PENDING', ?)
+
+        """, (
+
+            user["id"],
+            PAYMENT_AMOUNT,
+            method,
+            reference,
+            datetime.now().isoformat()
+
+        ))
+
+        payment_id = cursor.lastrowid
+
+        conn.commit()
+        conn.close()
+
+    return payment_id
+
+
+# =====================================
+# ADMIN NOTIFICATION
+# =====================================
+
+def notify_admin(payment_id):
+
+    if not ADMIN_ID:
+        logger.error("ADMIN_ID missing")
+        return
+
+    conn = get_db()
+
+    payment = conn.execute("""
+
+    SELECT
+        payments.*,
+        users.full_name,
+        users.phone,
+        users.telegram_id
+
+    FROM payments
+
+    JOIN users
+    ON users.id=payments.user_id
+
+    WHERE payments.id=?
+
+    """, (payment_id,)).fetchone()
+
+    conn.close()
+
+    if not payment:
+        return
+
+    text = f"""
+💰 <b>NEW EKUB PAYMENT</b>
+
+━━━━━━━━━━━━━━━━━━
+
+🆔 Payment ID: {payment['id']}
+
+👤 Name: {payment['full_name']}
+
+📱 Phone: {payment['phone']}
+
+💵 Amount: {payment['amount']} Birr
+
+🏦 Method: {payment['payment_method']}
+
+🔖 Reference:
+<code>{payment['transaction_reference']}</code>
+
+⏳ Status: PENDING
+
+━━━━━━━━━━━━━━━━━━
+"""
+
+    keyboard = {
+
+        "inline_keyboard": [
+
+            [
+
+                {
+                    "text": "✅ APPROVE",
+                    "callback_data": f"approve_{payment_id}"
+                },
+
+                {
+                    "text": "❌ REJECT",
+                    "callback_data": f"reject_{payment_id}"
+                }
+
+            ]
+
+        ]
+
+    }
+
+    send_message(
+        ADMIN_ID,
+        text,
+        keyboard
+    )
+
+
+# =====================================
+# APPROVE PAYMENT
+# =====================================
+
+def approve_payment(payment_id):
+
+    with db_lock:
+
+        conn = get_db()
+
+        try:
+
+            conn.execute("BEGIN IMMEDIATE")
+
+            payment = conn.execute("""
+
+            SELECT *
+            FROM payments
+            WHERE id=?
+
+            """, (payment_id,)).fetchone()
+
+            if not payment:
+
+                conn.rollback()
+                return False, "Payment not found"
+
+            if payment["status"] != "PENDING":
+
+                conn.rollback()
+                return False, "Already processed"
+
+            ticket = generate_ticket(conn)
+
+            if ticket is None:
+
+                conn.rollback()
+                return False, "All tickets sold"
+
+            conn.execute("""
+
+            UPDATE payments
+
+            SET
+                status='APPROVED',
+                ticket_number=?,
+                approved_at=?
+
+            WHERE id=?
+
+            """, (
+
+                ticket,
+                datetime.now().isoformat(),
+                payment_id
+
+            ))
+
+            user = conn.execute("""
+
+            SELECT telegram_id
+            FROM users
+            WHERE id=?
+
+            """, (payment["user_id"],)).fetchone()
+
+            conn.commit()
+
+        except Exception:
+
+            conn.rollback()
+            logger.exception("Approval error")
+
+            return False, "Database error"
+
+        finally:
+
+            conn.close()
+
+    if user:
+
+        send_message(
+
+            user["telegram_id"],
+
+            f"""
+🎉 <b>PAYMENT APPROVED!</b>
+
+🏆 <b>PETROS & TOLERA</b>
+
+<b>DIGITAL EKUB</b>
+
+━━━━━━━━━━━━━━━━━━
+
+💵 Payment: 200 Birr
+
+🎟️ YOUR TICKET:
+
+<b>#{ticket:04d}</b>
+
+✅ Your participation is confirmed.
+
+🥇 First Prize: 500,000 Birr
+
+🥈 Second Prize: 30,000 Birr
+
+🥉 Third Prize: 20,000 Birr
+
+━━━━━━━━━━━━━━━━━━
+
+Good Luck! 🍀
+"""
+
+        )
+
+    return True, ticket
+
+
+# =====================================
+# REJECT PAYMENT
+# =====================================
+
+def reject_payment(payment_id):
+
+    with db_lock:
+
+        conn = get_db()
+
+        try:
+
+            conn.execute("BEGIN IMMEDIATE")
+
+            payment = conn.execute("""
+
+            SELECT *
+            FROM payments
+            WHERE id=?
+
+            """, (payment_id,)).fetchone()
+
+            if not payment:
+                conn.rollback()
+                return False
+
+            if payment["status"] != "PENDING":
+                conn.rollback()
+                return False
+
+            conn.execute("""
+
+            UPDATE payments
+
+            SET status='REJECTED'
+
+            WHERE id=?
+
+            """, (payment_id,))
+
+            user = conn.execute("""
+
+            SELECT telegram_id
+            FROM users
+            WHERE id=?
+
+            """, (payment["user_id"],)).fetchone()
+
+            conn.commit()
+
+        except Exception:
+
+            conn.rollback()
+            logger.exception("Reject error")
+            return False
+
+        finally:
+
+            conn.close()
+
+    if user:
+
+        send_message(
+
+            user["telegram_id"],
+
+            """
+❌ <b>PAYMENT REJECTED</b>
+
+Your payment could not be approved.
+
+Please contact the administrator
+for more information.
+"""
+
+        )
+
+    return True
+
+
+# =====================================
+# MAIN KEYBOARD
+# =====================================
+
+def main_keyboard():
+
+    buttons = []
+
+    if WEBAPP_URL:
+
+        buttons.append([
+
+            {
+                "text": "🌐 OPEN DIGITAL EKUB",
+
+                "web_app": {
+                    "url": WEBAPP_URL
+                }
+
+            }
+
+        ])
+
+    buttons.append([
+
+        {
+            "text": "👤 MY PROFILE",
+            "callback_data": "profile"
+        },
+
+        {
+            "text": "🎟️ MY TICKET",
+            "callback_data": "ticket"
+        }
+
+    ])
+
+    buttons.append([
+
+        {
+            "text": "💰 PAYMENT HISTORY",
+            "callback_data": "history"
+        }
+
+    ])
+
+    return {
+
+        "keyboard": buttons,
+        "resize_keyboard": True
+
+    }
+
+
+# =====================================
+# TELEGRAM UPDATE HANDLER
+# =====================================
+
+def handle_update(update):
+
+    if "message" in update:
+
+        message = update["message"]
+
+        chat_id = message["chat"]["id"]
+
+        user = message.get("from", {})
+
+        telegram_id = user.get("id")
+
+        text = message.get("text", "")
+
+        full_name = (
+
+            user.get("first_name", "") +
+            " " +
+            user.get("last_name", "")
+
+        ).strip()
+
+        if not telegram_id:
+            return
+
+        if text.startswith("/start"):
+
+            register_user(
+                telegram_id,
+                full_name
+            )
+
+            send_message(
+
+                chat_id,
+
+                f"""
+🏆 <b>PETROS & TOLERA</b>
+
+<b>DIGITAL EKUB</b>
+
+Welcome, {full_name}!
+
+━━━━━━━━━━━━━━━━━━
+
+💰 Membership: 200 Birr
+
+🎟️ Total Tickets: 6,000
+
+🥇 First Prize: 500,000 Birr
+
+🥈 Second Prize: 30,000 Birr
+
+🥉 Third Prize: 20,000 Birr
+
+━━━━━━━━━━━━━━━━━━
+
+Press OPEN DIGITAL EKUB
+to continue.
+""",
+
+                main_keyboard()
+
+            )
+
+        return
+
+    if "callback_query" not in update:
+        return
+
+    callback = update["callback_query"]
+
+    data = callback.get("data", "")
+
+    callback_id = callback["id"]
+
+    user_id = callback["from"]["id"]
+
+    # APPROVE
+
+    if data.startswith("approve_"):
+
+        if user_id != ADMIN_ID:
+
+            answer_callback(
+                callback_id,
+                "Unauthorized"
+            )
+
+            return
+
+        payment_id = int(data.split("_")[1])
+
+        success, result = approve_payment(payment_id)
+
+        if success:
+
+            answer_callback(
+                callback_id,
+                "Payment approved!"
+            )
+
+            send_message(
+
+                ADMIN_ID,
+
+                f"""
+✅ PAYMENT APPROVED
+
+Payment ID: {payment_id}
+
+🎟️ Ticket: #{result:04d}
+"""
+
+            )
+
+        else:
+
+            answer_callback(
+                callback_id,
+                str(result)
+            )
+
+    # REJECT
+
+    elif data.startswith("reject_"):
+
+        if user_id != ADMIN_ID:
+
+            answer_callback(
+                callback_id,
+                "Unauthorized"
+            )
+
+            return
+
+        payment_id = int(data.split("_")[1])
+
+        success = reject_payment(payment_id)
+
+        answer_callback(
+
+            callback_id,
+
+            "Payment rejected"
+            if success else "Cannot reject payment"
+
+        )
+
+    # PROFILE
+
+    elif data == "profile":
+
+        user = get_user(user_id)
+
+        if user:
+
+            send_message(
+
+                user_id,
+
+                f"""
+👤 <b>MY PROFILE</b>
+
+━━━━━━━━━━━━━━━━
+
+Name: {user['full_name']}
+
+Phone: {user['phone'] or 'Not added'}
+
+Telegram ID: {user_id}
+
+━━━━━━━━━━━━━━━━
+"""
+
+            )
+
+        answer_callback(callback_id, "Profile")
+
+    # TICKETS
+
+    elif data == "ticket":
+
+        conn = get_db()
+
+        tickets = conn.execute("""
+
+        SELECT ticket_number
+
+        FROM payments
+
+        JOIN users
+        ON users.id=payments.user_id
+
+        WHERE users.telegram_id=?
+
+        AND payments.status='APPROVED'
+
+        ORDER BY payments.id DESC
+
+        """, (user_id,)).fetchall()
+
+        conn.close()
+
+        if tickets:
+
+            ticket_text = "\n".join(
+
+                f"🎟️ #{x['ticket_number']:04d}"
+
+                for x in tickets
+
+            )
+
+        else:
+
+            ticket_text = "No approved tickets yet."
+
+        send_message(
+
+            user_id,
+
+            "🎟️ <b>MY TICKETS</b>\n\n" +
+            ticket_text
+
+        )
+
+        answer_callback(callback_id, "Tickets")
+
+    # HISTORY
+
+    elif data == "history":
+
+        conn = get_db()
+
+        history = conn.execute("""
+
+        SELECT payments.*
+
+        FROM payments
+
+        JOIN users
+        ON users.id=payments.user_id
+
+        WHERE users.telegram_id=?
+
+        ORDER BY payments.id DESC
+
+        """, (user_id,)).fetchall()
+
+        conn.close()
+
+        result = ""
+
+        for item in history:
+
+            result += (
+
+                f"💰 {item['amount']} Birr\n"
+
+                f"Status: {item['status']}\n"
+
+                f"Ticket: {item['ticket_number'] or '-'}\n\n"
+
+            )
+
+        if not result:
+            result = "No payment history."
+
+        send_message(
+
+            user_id,
+
+            "📜 <b>PAYMENT HISTORY</b>\n\n" +
+            result
+
+        )
+
+        answer_callback(callback_id, "History")
+
+
+# =====================================
+# TELEGRAM POLLING
+# =====================================
+
+def telegram_worker():
+
+    if not BOT_TOKEN:
+
+        logger.error("BOT_TOKEN missing")
+        return
+
+    # Remove old webhook before polling.
+
+    telegram("deleteWebhook", {
+        "drop_pending_updates": False
     })
 
-@app.post("/api/spin")
-def spin_api():
-    payload = request.get_json(silent=True) or {}
-    user_id = verify_telegram_init_data(payload.get("initData", ""))
-    if not user_id or user_id != ADMIN_ID:
-        return jsonify({"ok":False,"error":"Admin qofa geengoo naannessuu danda'a."}), 403
-    kind = str(payload.get("kind", ""))
-    if kind not in GAMES:
-        return jsonify({"ok":False,"error":"Tapha sirrii filadhu."}), 400
-    try:
-        result = draw_and_pay(kind)
-    except ValueError as exc:
-        return jsonify({"ok":False,"error":str(exc)}), 400
-    except Exception:
-        logger.exception("Spin/payout failed")
-        return jsonify({"ok":False,"error":"Dogoggorri uumame. Admin log ilaalu qaba."}), 500
-    # Send the completed result to players after the database transaction has committed.
-    try:
-        loop = asyncio.run_coroutine_threadsafe(
-            broadcast_result(kind, result["result"], result["players"]),
-            BOT_LOOP
-        )
-        loop.result(timeout=30)
-    except Exception:
-        logger.exception("Bu'aa taphaa erguun hin milkoofne")
-    return jsonify({"ok":True,"numbers":result["numbers"],"result":result["result"]})
+    offset = None
 
-BOT_LOOP = None
+    logger.info("Telegram polling started")
 
-def draw_and_pay(kind):
-    """One atomic, idempotent draw and payout per round."""
-    with game_lock:
-        db = get_db()
+    while True:
+
         try:
-            db.execute("BEGIN IMMEDIATE")
-            state = db.execute("SELECT finished,round_no FROM game_state WHERE kind=?", (kind,)).fetchone()
-            if not state:
-                raise ValueError("Taphaan hin argamne.")
-            round_no = state["round_no"]
-            existing = db.execute("SELECT numbers,result FROM game_draws WHERE kind=? AND round_no=?",
-                                   (kind,round_no)).fetchone()
-            if existing:
-                raise ValueError("Geengoon marsaa kanaaf duraan naanna'eera.")
-            players_rows = db.execute("SELECT user_id,name,group_start FROM players WHERE kind=? ORDER BY group_start",
-                                      (kind,)).fetchall()
-            if len(players_rows) != MAX_PLAYERS or not state["finished"]:
-                raise ValueError(f"Taphaan guutuu qaba: hirmaattota {len(players_rows)}/{MAX_PLAYERS}.")
-            players = [dict(r) for r in players_rows]
-            numbers = random.sample(range(1,101), 2)
-            winner_lines = []
-            for place, number in enumerate(numbers):
-                prize = GAMES[kind]["prizes"][place]
-                winner = next((p for p in players if p["group_start"] <= number <= p["group_start"] + 4), None)
-                if winner:
-                    # A unique round record prevents duplicate payout after retries/restarts.
-                    db.execute("""UPDATE balances SET amount=amount+?,name=?,updated_at=? WHERE user_id=?""",
-                               (prize,winner["name"],now_text(),winner["user_id"]))
-                    db.execute("""INSERT INTO balance_transactions(user_id,amount,transaction_type,description,created_at)
-                                   VALUES(?,?,'game_prize',?,?)""",
-                               (winner["user_id"],prize,f"Abba {kind}, marsaa {round_no}, mo'ataa {place+1}, lakkoofsa {number}",now_text()))
-                    winner_lines.append(
-                        f"🏆 MO'ATAA {place+1}\n👤 Maqaa: {winner['name']}\n"
-                        f"🔢 Lakkoofsa: {number}\n🎟️ Garee: {winner['group_start']}–{winner['group_start']+4}\n"
-                        f"💰 Badhaasa: {prize:,} birr\n✅ Balance irratti dabalameera."
+
+            params = {
+                "timeout": 30
+            }
+
+            if offset is not None:
+                params["offset"] = offset
+
+            response = requests.get(
+
+                f"{BASE_URL}/getUpdates",
+
+                params=params,
+
+                timeout=40
+
+            )
+
+            result = response.json()
+
+            if not result.get("ok"):
+
+                logger.error("Polling error: %s", result)
+
+                time.sleep(5)
+                continue
+
+            for update in result.get("result", []):
+
+                offset = update["update_id"] + 1
+
+                try:
+
+                    handle_update(update)
+
+                except Exception:
+
+                    logger.exception(
+                        "Update handling error"
                     )
-                else:
-                    winner_lines.append(f"🎯 Lakkoofsa mo'ataa {place+1}: {number}\n❌ Gareen lakkoofsa kana qabu hin jiru.\n💰 Badhaasni manaaf hafa.")
-            result_text = f"🎡 BU'AA GEENGOO — TAPHA ABBA {kind}\nMarsaa: {round_no}\n\n" + "\n\n".join(winner_lines)
-            db.execute("INSERT INTO game_draws(kind,round_no,numbers,result,created_at) VALUES(?,?,?,?,?)",
-                       (kind,round_no,json.dumps(numbers),result_text,now_text()))
-            db.execute("INSERT INTO game_results(kind,result,created_at) VALUES(?,?,?)",
-                       (kind,result_text,now_text()))
-            db.commit()
-            return {"numbers":numbers,"result":result_text,"players":players}
+
         except Exception:
-            db.rollback()
-            raise
-        finally:
-            db.close()
 
-async def broadcast_result(kind, result, players):
-    for player in players:
-        try:
-            await application_bot_send(player["user_id"], result)
-        except Exception:
-            logger.exception("Bu'aa gara user %s erguun hin milkoofne", player["user_id"])
-    if ADMIN_ID:
-        try:
-            await application_bot_send(ADMIN_ID, result)
-        except Exception:
-            logger.exception("Bu'aa adminitti erguun hin milkoofne")
-    with get_db() as db:
-        db.execute("DELETE FROM game_views WHERE kind=?", (kind,))
+            logger.exception(
+                "Telegram polling error"
+            )
 
-# This callback is assigned once the Telegram Application starts.
-BOT_SEND = None
-async def application_bot_send(chat_id, text):
-    if BOT_SEND is None:
-        raise RuntimeError("Telegram bot hin qindaa'in.")
-    await BOT_SEND(chat_id=chat_id, text=text)
+            time.sleep(5)
 
-def main_menu():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎮 Tapha Abba 100 Birr", callback_data="game_100")],
-        [InlineKeyboardButton("🎮 Tapha Abba 200 Birr", callback_data="game_200")],
-        [InlineKeyboardButton("💰 My Balance", callback_data="my_balance")],
-        [InlineKeyboardButton("➕ Deposit", callback_data="deposit")],
-        [InlineKeyboardButton("📜 Seenaa Taphaa", callback_data="history")],
-    ])
 
-def back_menu():
-    return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Gara Menu", callback_data="menu")]])
+def start_telegram_worker():
 
-def deposit_methods_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📱 Telebirr - Chala", callback_data="method_telebirr1")],
-        [InlineKeyboardButton("📱 Telebirr - Sanyi", callback_data="method_telebirr2")],
-        [InlineKeyboardButton("🏦 CBE Bank", callback_data="method_cbe")],
-        [InlineKeyboardButton("🏦 Awash Bank", callback_data="method_awash")],
-        [InlineKeyboardButton("⬅️ Gara Menu", callback_data="menu")],
-    ])
+    global polling_started
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.effective_message:
-        return
-    user = update.effective_user
-    with get_db() as db:
-        ensure_balance_user(db,user.id,user.full_name)
-    await update.effective_message.reply_text(
-        "🎯 BAGA GARA KOSHKOSHE BOT DHUFTAN!\n\n"
-        "🎮 TAPHA ABBA 100\n💵 Gatii garee: 100 birr\n🥇 Badhaasa 1ffaa: 1,000 birr\n🥈 Badhaasa 2ffaa: 500 birr\n\n"
-        "🎮 TAPHA ABBA 200\n💵 Gatii garee: 200 birr\n🥇 Badhaasa 1ffaa: 2,000 birr\n🥈 Badhaasa 2ffaa: 1,000 birr\n\n"
-        "📌 Garee tokko lakkoofsota 5 qaba; garee tokko namni tokko qofa qabaata.\n"
-        "📌 Deposit Adminiin erga mirkanaa'ee booda balance dabala.\n👇 Tapha kee filadhu:",
-        reply_markup=main_menu())
+    with polling_lock:
 
-async def show_balance(query):
-    user=query.from_user
-    with get_db() as db: ensure_balance_user(db,user.id,user.full_name)
-    await query.edit_message_text(
-        f"💰 MY BALANCE\n\n👤 Maqaa: {user.full_name}\n🆔 User ID: {user.id}\n💵 Balance: {get_balance(user.id):,} birr",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("➕ Deposit",callback_data="deposit")],[InlineKeyboardButton("⬅️ Gara Menu",callback_data="menu")]]))
+        if polling_started:
+            return
 
-async def start_deposit(query, context):
-    for key in ("deposit_method","deposit_amount","deposit_id","deposit_step"): context.user_data.pop(key,None)
-    await query.edit_message_text("➕ DEPOSIT\n\nKaraa ittiin maallaqa galchitu filadhu:",reply_markup=deposit_methods_keyboard())
+        if not BOT_TOKEN:
+            logger.error("BOT_TOKEN is not configured")
+            return
 
-async def choose_payment_method(query, context, method_key):
-    if method_key not in PAYMENT_METHODS:
-        await query.answer("Karaan kaffaltii kun hin jiru.",show_alert=True); return
-    method=PAYMENT_METHODS[method_key]
-    context.user_data["deposit_method"]=method_key; context.user_data["deposit_step"]="amount"
-    await query.edit_message_text(
-        f"💳 ODEEFFANNOO KAFFALTII\n\n🏦 Karaa: {method['name']}\n🔢 Account/lakkoofsa: {method['details']}\n👤 Maqaa: {method['owner']}\n\n"
-        "Maallaqa birriidhaan ergi. Fakkeenya: 500\n⚠️ Admin mirkaneessuu qaba.",reply_markup=back_menu())
+        thread = threading.Thread(
 
-async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message=update.effective_message; user=update.effective_user
-    if not message or not user: return
-    step=context.user_data.get("deposit_step")
-    if step=="amount":
-        if not message.text:
-            await message.reply_text("Maallaqa lakkoofsaan ergi. Fakkeenya: 500"); return
-        try: amount=int(message.text.strip().replace(",",""))
-        except ValueError:
-            await message.reply_text("Lakkoofsa sirrii galchi. Fakkeenya: 500"); return
-        if amount<1 or amount>1_000_000:
-            await message.reply_text("Maallaqa 1 hanga 1,000,000 birr galchi."); return
-        method=context.user_data.get("deposit_method")
-        if method not in PAYMENT_METHODS:
-            context.user_data.pop("deposit_step",None)
-            await message.reply_text("Karaa deposit irra deebi'ii filadhu.",reply_markup=deposit_methods_keyboard()); return
-        with get_db() as db:
-            cur=db.execute("""INSERT INTO deposits(user_id,username,method,amount,status,created_at)
-                              VALUES(?,?,?,?,'awaiting_receipt',?)""",(user.id,user.full_name,method,amount,now_text()))
-            did=cur.lastrowid
-        context.user_data["deposit_id"]=did; context.user_data["deposit_amount"]=amount; context.user_data["deposit_step"]="receipt"
-        await message.reply_text(f"✅ DEPOSIT REQUEST UUMAMEERA\n🧾 Request ID: #{did}\n💵 {amount:,} birr\nKaffaltii raawwadhu; booda ragaa kaffaltii ergi.")
-        return
-    if step=="receipt":
-        did=context.user_data.get("deposit_id")
-        if not did:
-            context.user_data.pop("deposit_step",None); await message.reply_text("Request deposit hin argamne. Irra deebi'i."); return
-        file_id=""; typ=""; receipt_text=""
-        if message.photo: file_id=message.photo[-1].file_id; typ="photo"
-        elif message.document: file_id=message.document.file_id; typ="document"
-        elif message.text:
-            receipt_text=message.text.strip(); typ="text"
-            if len(receipt_text)<4: await message.reply_text("Ragaa kaffaltii sirrii ergi."); return
-        else:
-            await message.reply_text("Ragaa kaffaltii suuraa, document ykn transaction IDn ergi."); return
-        with get_db() as db:
-            db.execute("""UPDATE deposits SET status='pending',receipt_file_id=?,receipt_type=?,receipt_text=?
-                          WHERE id=? AND user_id=? AND status='awaiting_receipt'""",(file_id,typ,receipt_text,did,user.id))
-            row=db.execute("SELECT * FROM deposits WHERE id=? AND user_id=?",(did,user.id)).fetchone()
-        for key in ("deposit_step","deposit_method","deposit_amount","deposit_id"): context.user_data.pop(key,None)
-        if not row or row["status"]!="pending":
-            await message.reply_text("Request kun hin jijjiiramne. Admin qunnami."); return
-        if not ADMIN_ID:
-            await message.reply_text("ADMIN_ID hin qindaa'in. Admin qunnami."); return
-        method=PAYMENT_METHODS[row["method"]]
-        caption=(f"🔔 DEPOSIT HAARAA\n🧾 Request ID: #{row['id']}\n👤 User: {row['username']}\n🆔 User ID: {row['user_id']}\n"
-                 f"💵 Maallaqa: {row['amount']:,} birr\n🏦 Karaa: {method['name']}\n📅 Yeroo: {row['created_at']}")
-        kb=InlineKeyboardMarkup([[InlineKeyboardButton("✅ Mirkaneessi",callback_data=f"approve_{did}"),
-                                  InlineKeyboardButton("❌ Didi",callback_data=f"reject_{did}")]])
-        try:
-            if typ=="photo": await context.bot.send_photo(ADMIN_ID,file_id,caption=caption,reply_markup=kb)
-            elif typ=="document": await context.bot.send_document(ADMIN_ID,file_id,caption=caption,reply_markup=kb)
-            else: await context.bot.send_message(ADMIN_ID,caption+"\n\nRagaa: "+receipt_text,reply_markup=kb)
-        except Exception:
-            logger.exception("Deposit adminitti erguun hin milkoofne")
-            await message.reply_text("Request kee kuufameera; Adminitti erguun hin milkoofne."); return
-        await message.reply_text(f"📨 Ragaan ergameera. Request #{did}; Admin mirkaneessuu eegi.",reply_markup=main_menu())
+            target=telegram_worker,
+            daemon=True
 
-def make_group_keyboard(kind):
-    occupied=get_occupied_groups(kind); keyboard=[]
-    for start in range(1,101,5):
-        end=start+4
-        if start in occupied: label=f"🟢 ✅ {start}–{end}"; cb=f"taken_{kind}_{start}"
-        else: label=f"⚪ 🎯 {start}–{end}"; cb=f"pick_{kind}_{start}"
-        keyboard.append([InlineKeyboardButton(label,callback_data=cb)])
-    keyboard.extend([[InlineKeyboardButton("🔄 Haaromsi",callback_data=f"game_{kind}")],
-                     [InlineKeyboardButton("⬅️ Gara Menu",callback_data="menu")]])
-    return InlineKeyboardMarkup(keyboard)
+        )
 
-async def save_game_view(query,kind):
-    if not query.message:return
-    with get_db() as db:
-        db.execute("""INSERT INTO game_views(kind,user_id,chat_id,message_id,updated_at) VALUES(?,?,?,?,?)
-                      ON CONFLICT(kind,user_id) DO UPDATE SET chat_id=excluded.chat_id,message_id=excluded.message_id,updated_at=excluded.updated_at""",
-                   (kind,query.from_user.id,query.message.chat_id,query.message.message_id,now_text()))
+        thread.start()
 
-async def refresh_group_views(context,kind):
-    with get_db() as db: rows=db.execute("SELECT user_id,chat_id,message_id FROM game_views WHERE kind=?",(kind,)).fetchall()
-    keyboard=make_group_keyboard(kind)
-    for row in rows:
-        try: await context.bot.edit_message_reply_markup(chat_id=row["chat_id"],message_id=row["message_id"],reply_markup=keyboard)
-        except Exception as exc: logger.info("Fuula user %s haaromsuun hin milkoofne: %s",row["user_id"],exc)
+        polling_started = True
 
-async def show_game(query,kind):
-    user=query.from_user; info=get_game_info(kind); count=get_player_count(kind); player=get_user_player(kind,user.id)
-    if info["finished"]:
-        await query.edit_message_text(f"🎮 Tapha Abba {kind}\n\nTaphaan kun guutameera. Admin geengoo naannessuu eegi.",reply_markup=back_menu()); return
-    balance=get_balance(user.id)
-    text=(f"🎮 TAPHA ABBA {kind}\n\n💵 Gatii garee: {GAMES[kind]['price']:,} birr\n💰 Balance kee: {balance:,} birr\n"
-          f"👥 Gareewwan fudhataman: {count}/{MAX_PLAYERS}\n\n🟢 = Garee bitame\n⚪ = Garee bilisaa\n\nGaree tokko filadhu. Gareen tokko lakkoofsota 5 qaba.")
-    if player:text+=f"\n\n✅ Garee kee: {player['group_start']}–{player['group_start']+4}. Garee biraa hin filachuu dandeessu."
-    await query.edit_message_text(text,reply_markup=make_group_keyboard(kind))
-    await save_game_view(query,kind)
 
-def get_history():
-    with get_db() as db: rows=db.execute("SELECT kind,result,created_at FROM game_results ORDER BY id DESC LIMIT 10").fetchall()
-    return [dict(r) for r in rows]
+# =====================================
+# WEB APP
+# =====================================
 
-async def review_deposit(query,approve,did):
-    if not ADMIN_ID or query.from_user.id!=ADMIN_ID:
-        await query.answer("⛔ Admin qofa kana gochuu danda'a.",show_alert=True);return
-    db=get_db()
+@app.route("/")
+def home():
+
+    if os.path.exists("index.html"):
+
+        return send_file("index.html")
+
+    return """
+    <h1>PETROS & TOLERA DIGITAL EKUB</h1>
+    <p>Application is online.</p>
+    """
+
+
+@app.route("/api/health")
+def health():
+
+    return jsonify({
+
+        "status": "online",
+
+        "project": "PETROS & TOLERA DIGITAL EKUB",
+
+        "tickets": TOTAL_TICKETS
+
+    })
+
+
+# =====================================
+# REGISTER API
+# =====================================
+
+@app.route("/api/register", methods=["POST"])
+def api_register():
+
+    data = request.get_json(silent=True) or {}
+
+    telegram_id = data.get("telegram_id")
+
+    full_name = data.get("full_name", "").strip()
+
+    phone = data.get("phone", "").strip()
+
+    if not telegram_id or not full_name:
+
+        return jsonify({
+
+            "success": False,
+            "message": "Name and Telegram ID required"
+
+        }), 400
+
     try:
-        db.execute("BEGIN IMMEDIATE")
-        dep=db.execute("SELECT * FROM deposits WHERE id=?",(did,)).fetchone()
-        if not dep or dep["status"]!="pending":
-            db.rollback();await query.answer("Request hin jiru ykn duraan ilaalameera.",show_alert=True);return
-        uid=dep["user_id"]; amount=dep["amount"]
-        if approve:
-            db.execute("INSERT OR IGNORE INTO balances(user_id,name,amount,updated_at) VALUES(?,?,0,?)",(uid,dep["username"],now_text()))
-            db.execute("UPDATE balances SET amount=amount+?,updated_at=? WHERE user_id=?",(amount,now_text(),uid))
-            db.execute("INSERT INTO balance_transactions(user_id,amount,transaction_type,description,created_at) VALUES(?,?,'deposit',?,?)",(uid,amount,f"Deposit #{did} mirkanaa'e",now_text()))
-        db.execute("UPDATE deposits SET status=?,reviewed_at=?,reviewed_by=? WHERE id=?",
-                   ("approved" if approve else "rejected",now_text(),query.from_user.id,did))
-        db.commit()
+
+        user = register_user(
+
+            int(telegram_id),
+            full_name,
+            phone
+
+        )
+
+        return jsonify({
+
+            "success": True,
+            "user": user
+
+        })
+
     except Exception:
-        db.rollback();logger.exception("Deposit review failed");await query.answer("Dogoggorri uumame.",show_alert=True);return
-    finally:db.close()
-    note=f"✅ Deposit #{did} mirkanaa'e." if approve else f"❌ Deposit #{did} didame."
+
+        logger.exception("Registration error")
+
+        return jsonify({
+
+            "success": False,
+            "message": "Registration failed"
+
+        }), 500
+
+
+# =====================================
+# PAYMENT API
+# =====================================
+
+@app.route("/api/payment", methods=["POST"])
+def api_payment():
+
+    data = request.get_json(silent=True) or {}
+
+    telegram_id = data.get("telegram_id")
+
+    full_name = data.get("full_name", "").strip()
+
+    phone = data.get("phone", "").strip()
+
+    method = data.get("payment_method", "").strip()
+
+    reference = data.get(
+        "transaction_reference", ""
+    ).strip()
+
+    if not all([
+
+        telegram_id,
+        full_name,
+        phone,
+        method,
+        reference
+
+    ]):
+
+        return jsonify({
+
+            "success": False,
+            "message": "All fields are required"
+
+        }), 400
+
+    if len(reference) > 150:
+
+        return jsonify({
+
+            "success": False,
+            "message": "Invalid transaction reference"
+
+        }), 400
+
     try:
-        if query.message.caption: await query.edit_message_caption(caption=(query.message.caption or "")+"\n\n"+note,reply_markup=None)
-        else: await query.edit_message_text((query.message.text or "")+"\n\n"+note,reply_markup=None)
-    except Exception:pass
+
+        payment_id = create_payment(
+
+            int(telegram_id),
+            full_name,
+            phone,
+            method,
+            reference
+
+        )
+
+        notify_admin(payment_id)
+
+        return jsonify({
+
+            "success": True,
+
+            "payment_id": payment_id,
+
+            "status": "PENDING",
+
+            "amount": PAYMENT_AMOUNT,
+
+            "message": "Payment submitted successfully"
+
+        })
+
+    except Exception:
+
+        logger.exception("Payment error")
+
+        return jsonify({
+
+            "success": False,
+            "message": "Payment submission failed"
+
+        }), 500
+
+
+# =====================================
+# USER PROFILE API
+# =====================================
+
+@app.route("/api/me")
+def api_me():
+
+    telegram_id = request.args.get(
+        "telegram_id",
+        type=int
+    )
+
+    if not telegram_id:
+
+        return jsonify({
+
+            "success": False,
+            "message": "Telegram ID required"
+
+        }), 400
+
+    user = get_user(telegram_id)
+
+    if not user:
+
+        return jsonify({
+
+            "success": False,
+            "message": "User not found"
+
+        }), 404
+
+    return jsonify({
+
+        "success": True,
+        "user": user
+
+    })
+
+
+# =====================================
+# HISTORY API
+# =====================================
+
+@app.route("/api/history")
+def api_history():
+
+    telegram_id = request.args.get(
+        "telegram_id",
+        type=int
+    )
+
+    if not telegram_id:
+
+        return jsonify({
+
+            "success": False,
+            "message": "Telegram ID required"
+
+        }), 400
+
+    conn = get_db()
+
+    history = conn.execute("""
+
+    SELECT payments.*
+
+    FROM payments
+
+    JOIN users
+    ON users.id=payments.user_id
+
+    WHERE users.telegram_id=?
+
+    ORDER BY payments.id DESC
+
+    """, (telegram_id,)).fetchall()
+
+    conn.close()
+
+    return jsonify({
+
+        "success": True,
+
+        "history": [dict(x) for x in history]
+
+    })
+
+
+# =====================================
+# TICKET API
+# =====================================
+
+@app.route("/api/tickets")
+def api_tickets():
+
+    conn = get_db()
+
+    rows = conn.execute("""
+
+    SELECT ticket_number
+
+    FROM payments
+
+    WHERE status='APPROVED'
+
+    AND ticket_number IS NOT NULL
+
+    """).fetchall()
+
+    conn.close()
+
+    sold = sorted([
+
+        x["ticket_number"]
+
+        for x in rows
+
+    ])
+
+    return jsonify({
+
+        "success": True,
+
+        "total": TOTAL_TICKETS,
+
+        "sold": sold,
+
+        "available": TOTAL_TICKETS - len(sold)
+
+    })
+
+
+# =====================================
+# ADMIN AUTHENTICATION
+# =====================================
+
+def admin_authorized():
+
     try:
-        msg=(f"✅ Deposit kee mirkanaa'eera. {amount:,} birr dabalameera.\nBalance: {get_balance(uid):,} birr" if approve
-             else "❌ Deposit request kee didameera. Admin qunnami.")
-        await query.get_bot().send_message(uid,msg,reply_markup=main_menu())
-    except Exception:logger.exception("Deposit result useritti erguun hin milkoofne")
 
-async def buttons(update:Update,context:ContextTypes.DEFAULT_TYPE):
-    query=update.callback_query
-    if not query:return
-    await query.answer(); data=query.data or ""; user=query.from_user
-    if data=="menu":
-        await query.edit_message_text("🎯 KOSHKOSHE BOT\n\nFilannoo kee filadhu:",reply_markup=main_menu());return
-    if data=="my_balance":await show_balance(query);return
-    if data=="deposit":await start_deposit(query,context);return
-    if data.startswith("method_"):await choose_payment_method(query,context,data[7:]);return
-    if data.startswith(("approve_","reject_")):
-        try:did=int(data.split("_",1)[1])
-        except ValueError:return
-        await review_deposit(query,data.startswith("approve_"),did);return
-    if data=="history":
-        items=get_history()
-        text="📜 Seenaa taphaa hin jiru." if not items else "📜 SEENAA TAPHAA\n\n"+"\n\n".join(f"🕒 {x['created_at']}\n{x['result']}" for x in items)
-        await query.edit_message_text(text[:4000],reply_markup=back_menu());return
-    if data.startswith("game_"):
-        kind=data.split("_",1)[1]
-        if kind in GAMES:await show_game(query,kind)
-        return
-    if data.startswith("taken_"):
-        parts=data.split("_")
-        if len(parts)==3 and parts[1] in GAMES:
-            await query.answer("🔒 Gareen kun duraan fudhatameera!",show_alert=True)
-            await show_game(query,parts[1])
-        return
-    if not data.startswith("pick_"):return
-    parts=data.split("_")
-    if len(parts)!=3:return
-    _,kind,group_text=parts
-    if kind not in GAMES:return
-    try:start=int(group_text)
-    except ValueError:return
-    if start not in range(1,101,5):
-        await query.answer("Garee sirrii filadhu.",show_alert=True);return
-    price=GAMES[kind]["price"]; end=start+4; error=None
-    with game_lock:
-        db=get_db()
-        try:
-            db.execute("BEGIN IMMEDIATE")
-            state=db.execute("SELECT finished FROM game_state WHERE kind=?",(kind,)).fetchone()
-            count=db.execute("SELECT COUNT(*) AS n FROM players WHERE kind=?",(kind,)).fetchone()["n"]
-            if not state or state["finished"]:error="Taphaan kun guutameera."
-            elif db.execute("SELECT 1 FROM players WHERE kind=? AND user_id=?",(kind,user.id)).fetchone():error="Garee tokko duraan qabda."
-            elif db.execute("SELECT 1 FROM players WHERE kind=? AND group_start=?",(kind,start)).fetchone():error="Gareen kun duraan fudhatameera."
-            elif count>=MAX_PLAYERS:error="Taphaan kun guutameera."
-            else:
-                bal=db.execute("SELECT amount FROM balances WHERE user_id=?",(user.id,)).fetchone()
-                if not bal or bal["amount"]<price:error=f"Balance kee gahaa miti. {price:,} birr barbaachisa."
-                else:
-                    db.execute("UPDATE balances SET amount=amount-?,name=?,updated_at=? WHERE user_id=?",(price,user.full_name,now_text(),user.id))
-                    db.execute("INSERT INTO balance_transactions(user_id,amount,transaction_type,description,created_at) VALUES(?,?,'game_entry',?,?)",(user.id,-price,f"Abba {kind}, garee {start}-{end}",now_text()))
-                    db.execute("INSERT INTO players(kind,user_id,name,group_start,created_at) VALUES(?,?,?,?,?)",(kind,user.id,user.full_name,start,now_text()))
-                    if count+1==MAX_PLAYERS:db.execute("UPDATE game_state SET finished=1 WHERE kind=?",(kind,))
-            db.commit()
-        except sqlite3.IntegrityError:
-            db.rollback();error="Gareen kun ykn galmeen kee duraan jira."
-        except Exception:
-            db.rollback();logger.exception("Garee galmeessuun hin milkoofne");error="Dogoggorri uumame."
-        finally:db.close()
-    if error:
-        await query.answer(error,show_alert=True);await show_game(query,kind);return
-    try:
-        await query.edit_message_text(
-            f"🎮 TAPHA ABBA {kind}\n\nGareen kee galmaa'eera: {start}–{end}\n"
-            f"💰 Balance: {get_balance(user.id):,} birr\n👥 Hirmaattota: {get_player_count(kind)}/{MAX_PLAYERS}\n\n"
-            "Geengoon adminiin erga naanna'ee booda bu'aan ni dhufa.",
-            reply_markup=make_group_keyboard(kind))
-        await save_game_view(query,kind)
-    except Exception:pass
-    await refresh_group_views(context,kind)
-    if get_game_info(kind)["finished"] and ADMIN_ID:
-        try:
-            await context.bot.send_message(
-                ADMIN_ID,
-                f"🔔 TAPHA ABBA {kind} GUUTAMEERA!\nHirmaattota 20 galmaa'aniiru. Geengoo naannessuuf /wheel {kind} fayyadami.")
-        except Exception:pass
+        admin_id = int(
+            request.headers.get("X-Admin-ID", "0")
+        )
 
-async def wheel_command(update:Update,context:ContextTypes.DEFAULT_TYPE):
-    user=update.effective_user; msg=update.effective_message
-    if not user or user.id!=ADMIN_ID:
-        await msg.reply_text("⛔ Admin qofa geengoo naannessuu danda'a.");return
-    if not context.args or context.args[0] not in GAMES:
-        await msg.reply_text("Fayyadama: /wheel 100 ykn /wheel 200");return
-    kind=context.args[0]
-    if not WEBAPP_URL:
-        await msg.reply_text("WEBAPP_URL Render Environment keessatti galchi (fakkeenya: https://your-app.onrender.com).");return
-    info=get_game_info(kind); count=get_player_count(kind)
-    if info["finished"] and count==MAX_PLAYERS:
-        with get_db() as db:
-            done=db.execute("SELECT 1 FROM game_draws WHERE kind=? AND round_no=?",(kind,info["round_no"])).fetchone()
-        if done:
-            await msg.reply_text("Geengoon marsaa kanaaf duraan naanna'eera.");return
-    keyboard=InlineKeyboardMarkup([[InlineKeyboardButton(
-        f"🎡 Geengoo Abba {kind} Naannessi",
-        web_app=WebAppInfo(url=f"{WEBAPP_URL}/wheel?kind={kind}"))]])
-    await msg.reply_text(
-        f"🎡 GEENGOO ABBA {kind}\n\nHirmaattota: {count}/{MAX_PLAYERS}\n"
-        "Geengoon hirmaattota 20 erga guutamanii booda qofa naanna'a.\n"
-        "Button armaan gadii tuqi. Admin qofa button kana argata.",
-        reply_markup=keyboard)
+        return (
+            ADMIN_ID != 0
+            and admin_id == ADMIN_ID
+        )
 
-async def addbalance(update:Update,context:ContextTypes.DEFAULT_TYPE):
-    user=update.effective_user; msg=update.effective_message
-    if not user or user.id!=ADMIN_ID:await msg.reply_text("⛔ Admin qofa.");return
-    if len(context.args)!=2:
-        await msg.reply_text("Fayyadama: /addbalance USER_ID AMOUNT");return
-    try:uid=int(context.args[0]);amount=int(context.args[1])
-    except ValueError:await msg.reply_text("User ID fi amount lakkoofsa ta'uu qabu.");return
-    if amount<=0:await msg.reply_text("Amount 0 ol ta'uu qaba.");return
-    with get_db() as db:
-        db.execute("INSERT OR IGNORE INTO balances(user_id,name,amount,updated_at) VALUES(?,?,0,?)",(uid,str(uid),now_text()))
-        db.execute("UPDATE balances SET amount=amount+?,updated_at=? WHERE user_id=?",(amount,now_text(),uid))
-        db.execute("INSERT INTO balance_transactions(user_id,amount,transaction_type,description,created_at) VALUES(?,?,'admin_credit',?,?)",(uid,amount,"Adminiin balance dabale",now_text()))
-    await msg.reply_text(f"✅ User {uid}: {amount:,} birr dabalame. Balance: {get_balance(uid):,} birr")
-    try:await context.bot.send_message(uid,f"💰 Balance kee irratti {amount:,} birr dabalameera.\nBalance: {get_balance(uid):,} birr")
-    except Exception:pass
+    except Exception:
 
-async def balance_command(update:Update,context:ContextTypes.DEFAULT_TYPE):
-    user=update.effective_user; msg=update.effective_message
-    if not user:return
-    if context.args and user.id==ADMIN_ID:
-        try:uid=int(context.args[0])
-        except ValueError:await msg.reply_text("User ID sirrii galchi.");return
-        await msg.reply_text(f"User ID: {uid}\nBalance: {get_balance(uid):,} birr");return
-    await msg.reply_text(f"💰 Balance kee: {get_balance(user.id):,} birr")
+        return False
 
-async def newgame(update:Update,context:ContextTypes.DEFAULT_TYPE):
-    user=update.effective_user; msg=update.effective_message
-    if not user or user.id!=ADMIN_ID:await msg.reply_text("⛔ Admin qofa.");return
-    if not context.args or context.args[0] not in GAMES:
-        await msg.reply_text("Fayyadama: /newgame 100 ykn /newgame 200");return
-    kind=context.args[0]
-    with game_lock:
-        db=get_db()
-        try:
-            db.execute("BEGIN IMMEDIATE")
-            # Keep previous result/history and increase the round identifier.
-            db.execute("DELETE FROM players WHERE kind=?",(kind,))
-            db.execute("UPDATE game_state SET finished=0,round_no=round_no+1 WHERE kind=?",(kind,))
-            db.execute("DELETE FROM game_views WHERE kind=?",(kind,))
-            db.commit()
-        except Exception:db.rollback();raise
-        finally:db.close()
-    await msg.reply_text(f"✅ Tapha Abba {kind} haaromfameera. Balance hin jijjiiramne.")
 
-async def error_handler(update,context):
-    logger.error("Dogoggora Telegram keessatti uumame:",exc_info=context.error)
+# =====================================
+# ADMIN PAYMENTS
+# =====================================
 
-def run_flask():
-    app.run(host="0.0.0.0",port=int(os.getenv("PORT","10000")),use_reloader=False)
+@app.route("/api/admin/payments")
+def admin_payments():
 
-async def main():
-    global BOT_LOOP, BOT_SEND
-    if not BOT_TOKEN:raise RuntimeError("BOT_TOKEN hin jiru. Render Environment keessatti galchi.")
-    if not ADMIN_ID:logger.warning("ADMIN_ID hin qindaa'in.")
-    init_db()
-    application=Application.builder().token(BOT_TOKEN).build()
-    BOT_LOOP=asyncio.get_running_loop()
-    BOT_SEND=application.bot.send_message
-    application.add_handler(CommandHandler("start",start))
-    application.add_handler(CommandHandler("balance",balance_command))
-    application.add_handler(CommandHandler("addbalance",addbalance))
-    application.add_handler(CommandHandler("newgame",newgame))
-    application.add_handler(CommandHandler("wheel",wheel_command))
-    application.add_handler(CallbackQueryHandler(buttons))
-    application.add_handler(MessageHandler((filters.PHOTO|filters.Document.ALL|filters.TEXT)&~filters.COMMAND,handle_user_message))
-    application.add_error_handler(error_handler)
-    threading.Thread(target=run_flask,daemon=True).start()
-    logger.info("Koshkoshe Bot jalqabuuf jira.")
-    async with application:
-        await application.start()
-        if application.updater is None:raise RuntimeError("Telegram updater hin argamne.")
-        await application.updater.start_polling(drop_pending_updates=False)
-        logger.info("Koshkoshe Bot hojiirra jira.")
-        try:await asyncio.Event().wait()
-        finally:
-            await application.updater.stop()
-            await application.stop()
+    if not admin_authorized():
 
-if __name__=="__main__":
-    asyncio.run(main())
+        return jsonify({
+
+            "success": False,
+            "message": "Unauthorized"
+
+        }), 403
+
+    conn = get_db()
+
+    payments = conn.execute("""
+
+    SELECT
+
+        payments.*,
+        users.full_name,
+        users.phone,
+        users.telegram_id
+
+    FROM payments
+
+    JOIN users
+    ON users.id=payments.user_id
+
+    ORDER BY payments.id DESC
+
+    """).fetchall()
+
+    conn.close()
+
+    return jsonify({
+
+        "success": True,
+
+        "payments": [dict(x) for x in payments]
+
+    })
+
+
+# =====================================
+# ADMIN STATISTICS
+# =====================================
+
+@app.route("/api/admin/stats")
+def admin_stats():
+
+    if not admin_authorized():
+
+        return jsonify({
+
+            "success": False
+
+        }), 403
+
+    conn = get_db()
+
+    total_users = conn.execute("""
+
+    SELECT COUNT(*) FROM users
+
+    """).fetchone()[0]
+
+    approved = conn.execute("""
+
+    SELECT COUNT(*)
+
+    FROM payments
+
+    WHERE status='APPROVED'
+
+    """).fetchone()[0]
+
+    pending = conn.execute("""
+
+    SELECT COUNT(*)
+
+    FROM payments
+
+    WHERE status='PENDING'
+
+    """).fetchone()[0]
+
+    revenue = conn.execute("""
+
+    SELECT COALESCE(SUM(amount), 0)
+
+    FROM payments
+
+    WHERE status='APPROVED'
+
+    """).fetchone()[0]
+
+    conn.close()
+
+    return jsonify({
+
+        "success": True,
+
+        "total_users": total_users,
+
+        "approved_payments": approved,
+
+        "pending_payments": pending,
+
+        "revenue": revenue,
+
+        "sold_tickets": approved,
+
+        "available_tickets": TOTAL_TICKETS - approved
+
+    })
+
+
+# =====================================
+# ADMIN APPROVE API
+# =====================================
+
+@app.route(
+    "/api/admin/approve/<int:payment_id>",
+    methods=["POST"]
+)
+def admin_approve(payment_id):
+
+    if not admin_authorized():
+
+        return jsonify({
+
+            "success": False
+
+        }), 403
+
+    success, result = approve_payment(payment_id)
+
+    return jsonify({
+
+        "success": success,
+
+        "result": result
+
+    })
+
+
+# =====================================
+# ADMIN REJECT API
+# =====================================
+
+@app.route(
+    "/api/admin/reject/<int:payment_id>",
+    methods=["POST"]
+)
+def admin_reject(payment_id):
+
+    if not admin_authorized():
+
+        return jsonify({
+
+            "success": False
+
+        }), 403
+
+    success = reject_payment(payment_id)
+
+    return jsonify({
+
+        "success": success
+
+    })
+
+
+# =====================================
+# START TELEGRAM WORKER
+# =====================================
+
+# Gunicorn imports this file.
+# Therefore polling must start outside __main__.
+
+start_telegram_worker()
+
+
+# =====================================
+# LOCAL SERVER
+# =====================================
+
+if __name__ == "__main__":
+
+    port = int(os.getenv("PORT", "10000"))
+
+    app.run(
+
+        host="0.0.0.0",
+
+        port=port,
+
+        debug=False,
+
+        use_reloader=False
+
+    )
